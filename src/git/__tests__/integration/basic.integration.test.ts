@@ -627,4 +627,23 @@ describe('GitService integration — basic queries', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('fullyMergedBranches', () => {
+    it('detects a branch squashed into main and leaves an open branch unmarked', async () => {
+      commit(repo.path, 'init', { 'base.txt': 'base\n' });
+      runGit(repo.path, ['checkout', '-b', 'feature/squashed']);
+      commit(repo.path, 'feature part one', { 'feature.txt': 'one\n' });
+      const squashedTip = commit(repo.path, 'feature part two', { 'feature.txt': 'one\ntwo\n' });
+      runGit(repo.path, ['update-ref', 'refs/remotes/origin/topic/squashed', squashedTip]);
+
+      runGit(repo.path, ['checkout', 'main']);
+      runGit(repo.path, ['merge', '--squash', 'feature/squashed']);
+      runGit(repo.path, ['commit', '-m', 'squash feature']);
+      runGit(repo.path, ['checkout', '-b', 'feature/open']);
+      commit(repo.path, 'unmerged work', { 'open.txt': 'open\n' });
+
+      const result = await svc.fullyMergedBranches(['main', 'feature/squashed', 'origin/topic/squashed', 'feature/open'], 'main');
+      expect(result).toEqual(new Set(['feature/squashed', 'origin/topic/squashed']));
+    });
+  });
 });

@@ -714,6 +714,62 @@ export class GitService {
     return null;
   }
 
+  async fullyMergedBranches(branchNames: string[], targetBranch: string): Promise<Set<string>> {
+    this.assertSafeRef(targetBranch, 'fullyMergedBranches');
+    const candidates = [...new Set(branchNames)].filter(name => name !== targetBranch);
+    for (const name of candidates) this.assertSafeRef(name, 'fullyMergedBranches');
+    if (candidates.length === 0) return new Set();
+
+    try {
+      const targetLog = await this.exec(
+        ['log', '--root', '--no-merges', '--format=commit %H', '-p', targetBranch],
+        { silent: true },
+      );
+      const targetPatchIds = await this.patchIds(targetLog);
+      const merged = new Set<string>();
+
+      for (const branch of candidates) {
+        try {
+          const base = (await this.exec(['merge-base', targetBranch, branch], { silent: true })).trim();
+          const tip = (await this.exec(['rev-parse', '--verify', `${branch}^{commit}`], { silent: true })).trim();
+          if (base === tip) {
+            merged.add(branch);
+            continue;
+          }
+
+          const branchLog = await this.exec(
+            ['log', '--no-merges', '--format=commit %H', '-p', `${base}..${branch}`],
+            { silent: true },
+          );
+          const branchPatchIds = await this.patchIds(branchLog);
+          if (branchPatchIds.size > 0 && [...branchPatchIds].every(id => targetPatchIds.has(id))) {
+            merged.add(branch);
+            continue;
+          }
+
+          const combinedDiff = await this.exec(['diff', '--no-ext-diff', '--binary', base, branch], { silent: true });
+          if (!combinedDiff.trim()) {
+            merged.add(branch);
+            continue;
+          }
+          const combinedPatchIds = await this.patchIds(combinedDiff);
+          if ([...combinedPatchIds].some(id => targetPatchIds.has(id))) merged.add(branch);
+        } catch {}
+      }
+
+      return merged;
+    } catch (err) {
+      this.warn(`failed to detect fully merged branches: ${err instanceof Error ? err.message : err}`);
+      return new Set();
+    }
+  }
+
+  private async patchIds(patch: string): Promise<Set<string>> {
+    if (!patch.trim()) return new Set();
+    const output = await this.exec(['patch-id', '--stable'], { stdin: patch, silent: true });
+    return new Set(output.trim().split('\n').map(line => line.split(/\s+/)[0]).filter(Boolean));
+  }
+
   async tags(): Promise<TagInfo[]> {
     return this.dedupe('tags', async () => {
       const raw = await this.exec([
