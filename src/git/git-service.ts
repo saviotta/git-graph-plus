@@ -747,7 +747,7 @@ export class GitService {
             continue;
           }
 
-          const combinedDiff = await this.exec(['diff', '--no-ext-diff', '--binary', base, branch], { silent: true });
+          const combinedDiff = await this.exec(['diff', '--no-ext-diff', base, branch], { silent: true });
           if (!combinedDiff.trim()) {
             merged.add(branch);
             continue;

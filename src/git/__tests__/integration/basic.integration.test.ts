@@ -633,7 +633,10 @@ describe('GitService integration — basic queries', () => {
       commit(repo.path, 'init', { 'base.txt': 'base\n' });
       runGit(repo.path, ['checkout', '-b', 'feature/squashed']);
       commit(repo.path, 'feature part one', { 'feature.txt': 'one\n' });
-      const squashedTip = commit(repo.path, 'feature part two', { 'feature.txt': 'one\ntwo\n' });
+      const squashedTip = commit(repo.path, 'feature part two', {
+        'feature.txt': 'one\ntwo\n',
+        'screenshot.png': '\0\x01binary image data',
+      });
       runGit(repo.path, ['update-ref', 'refs/remotes/origin/topic/squashed', squashedTip]);
 
       runGit(repo.path, ['checkout', 'main']);
