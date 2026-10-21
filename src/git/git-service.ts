@@ -3,6 +3,8 @@ import { existsSync } from 'fs';
 import { writeFile, unlink } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import type { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { bufferStream, BufferOverflowError } from '../utils/buffer-stream';
 import { getGitBinaryPath } from './git-binary';
 import { resolveGitDirs } from '../services/file-watcher-helpers';
@@ -356,7 +358,13 @@ export class GitService {
     }
   }
 
-  private exec(args: string[], options?: { stdin?: string; timeout?: number; silent?: boolean; maxBufferBytes?: number }): Promise<string> {
+  private exec(args: string[], options?: {
+    stdin?: string | Readable;
+    stdout?: (stream: Readable) => Promise<string>;
+    timeout?: number;
+    silent?: boolean;
+    maxBufferBytes?: number;
+  }): Promise<string> {
     const startTime = Date.now();
     const command = `git ${args.join(' ')}`;
     const timeoutMs = options?.timeout ?? this.defaultTimeoutMs;
@@ -410,7 +418,7 @@ export class GitService {
         reject(new GitError(`Command timed out after ${timeoutMs}ms`, null, args));
       }, timeoutMs);
 
-      if (options?.stdin) {
+      if (typeof options?.stdin === 'string') {
         // git may close stdin before consuming everything (e.g. it rejects a
         // patch early). The resulting EPIPE surfaces as a writable-stream
         // 'error' event; without a listener Node rethrows it as an
@@ -424,23 +432,28 @@ export class GitService {
       // Bound stdout/stderr to prevent a pathological git invocation from
       // exhausting the extension host's memory. Overflow rejects immediately
       // and signals the process to terminate.
-      const stdoutP = bufferStream(proc.stdout, maxBytes);
+      const stdoutP = options?.stdout
+        ? options.stdout(proc.stdout).then(output => Buffer.from(output))
+        : bufferStream(proc.stdout, maxBytes);
       const stderrP = bufferStream(proc.stderr, maxBytes);
-      const onOverflow = (label: 'stdout' | 'stderr') => (err: unknown) => {
-        if (!(err instanceof BufferOverflowError)) return;
+      const onStreamError = (label: 'stdin' | 'stdout' | 'stderr') => (err: unknown) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         killHard();
         recordActivity(false);
-        reject(new GitError(
-          `git ${args[0] ?? ''}: ${label} exceeded ${err.limitBytes} bytes`,
-          null,
-          args,
+        reject(err instanceof GitError ? err : new GitError(
+          err instanceof BufferOverflowError
+            ? `git ${args[0] ?? ''}: ${label} exceeded ${err.limitBytes} bytes`
+            : `git ${args[0] ?? ''}: ${label}: ${err instanceof Error ? err.message : err}`,
+          null, args,
         ));
       };
-      stdoutP.catch(onOverflow('stdout'));
-      stderrP.catch(onOverflow('stderr'));
+      stdoutP.catch(onStreamError('stdout'));
+      stderrP.catch(onStreamError('stderr'));
+      if (options?.stdin && typeof options.stdin !== 'string') {
+        void pipeline(options.stdin, proc.stdin).catch(onStreamError('stdin'));
+      }
 
       proc.on('close', async (code) => {
         clearTimeout(timer);
@@ -721,11 +734,9 @@ export class GitService {
     if (candidates.length === 0) return new Set();
 
     try {
-      const targetLog = await this.exec(
+      const targetPatchIds = await this.patchIds(
         ['log', '--root', '--no-merges', '--format=commit %H', '-p', targetBranch],
-        { silent: true },
       );
-      const targetPatchIds = await this.patchIds(targetLog);
       const merged = new Set<string>();
 
       for (const branch of candidates) {
@@ -737,22 +748,19 @@ export class GitService {
             continue;
           }
 
-          const branchLog = await this.exec(
+          const branchPatchIds = await this.patchIds(
             ['log', '--no-merges', '--format=commit %H', '-p', `${base}..${branch}`],
-            { silent: true },
           );
-          const branchPatchIds = await this.patchIds(branchLog);
           if (branchPatchIds.size > 0 && [...branchPatchIds].every(id => targetPatchIds.has(id))) {
             merged.add(branch);
             continue;
           }
 
-          const combinedDiff = await this.exec(['diff', '--no-ext-diff', base, branch], { silent: true });
-          if (!combinedDiff.trim()) {
+          const combinedPatchIds = await this.patchIds(['diff', '--no-ext-diff', base, branch]);
+          if (combinedPatchIds.size === 0) {
             merged.add(branch);
             continue;
           }
-          const combinedPatchIds = await this.patchIds(combinedDiff);
           if ([...combinedPatchIds].some(id => targetPatchIds.has(id))) merged.add(branch);
         } catch {}
       }
@@ -764,9 +772,12 @@ export class GitService {
     }
   }
 
-  private async patchIds(patch: string): Promise<Set<string>> {
-    if (!patch.trim()) return new Set();
-    const output = await this.exec(['patch-id', '--stable'], { stdin: patch, silent: true });
+  private async patchIds(args: string[]): Promise<Set<string>> {
+    // Stream patches with backpressure; only the compact patch IDs are buffered.
+    const output = await this.exec(args, {
+      silent: true,
+      stdout: stream => this.exec(['patch-id', '--stable'], { stdin: stream, silent: true }),
+    });
     return new Set(output.trim().split('\n').map(line => line.split(/\s+/)[0]).filter(Boolean));
   }
 

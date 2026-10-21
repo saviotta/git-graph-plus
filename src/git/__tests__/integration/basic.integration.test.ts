@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GitService } from '../../git-service';
+import * as streamBuffer from '../../../utils/buffer-stream';
 import { TempRepo, commit, createTempRepo, runGit, seedBranches, currentBranch } from './helpers';
 
 describe('GitService integration — basic queries', () => {
@@ -629,6 +630,38 @@ describe('GitService integration — basic queries', () => {
   });
 
   describe('fullyMergedBranches', () => {
+    it('detects squash and cherry-pick matches when patches exceed the output buffer limit', async () => {
+      commit(repo.path, 'init', { 'base.txt': 'base\n' });
+      runGit(repo.path, ['checkout', '-b', 'feature/squashed']);
+      commit(repo.path, 'part one', { 'large.txt': 'one\n'.repeat(4096) });
+      commit(repo.path, 'part two', { 'large.txt': 'two\n'.repeat(4096) });
+      runGit(repo.path, ['checkout', 'main']);
+      runGit(repo.path, ['merge', '--squash', 'feature/squashed']);
+      runGit(repo.path, ['commit', '-m', 'squash feature']);
+      runGit(repo.path, ['checkout', '-b', 'feature/picked']);
+      const picked = commit(repo.path, 'picked work', { 'picked.txt': 'picked\n'.repeat(4096) });
+      runGit(repo.path, ['checkout', 'main']);
+      commit(repo.path, 'advance main', { 'main.txt': 'main\n' });
+      runGit(repo.path, ['cherry-pick', picked]);
+      runGit(repo.path, ['checkout', '-b', 'feature/open']);
+      commit(repo.path, 'open work', { 'open.txt': 'open\n'.repeat(4096) });
+
+      const warn = vi.fn();
+      svc.setWarningHandler(warn);
+      const originalBufferStream = streamBuffer.bufferStream;
+      const bufferSpy = vi.spyOn(streamBuffer, 'bufferStream')
+        .mockImplementation((stream, limit) => originalBufferStream(stream, Math.min(limit, 4096)));
+      try {
+        const result = await svc.fullyMergedBranches(
+          ['feature/squashed', 'feature/picked', 'feature/open'], 'main',
+        );
+        expect(result).toEqual(new Set(['feature/squashed', 'feature/picked']));
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        bufferSpy.mockRestore();
+      }
+    });
+
     it('detects a branch squashed into main and leaves an open branch unmarked', async () => {
       commit(repo.path, 'init', { 'base.txt': 'base\n' });
       runGit(repo.path, ['checkout', '-b', 'feature/squashed']);
