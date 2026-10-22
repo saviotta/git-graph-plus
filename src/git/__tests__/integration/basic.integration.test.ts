@@ -681,5 +681,28 @@ describe('GitService integration — basic queries', () => {
       const result = await svc.fullyMergedBranches(['main', 'feature/squashed', 'origin/topic/squashed', 'feature/open'], 'main');
       expect(result).toEqual(new Set(['feature/squashed', 'origin/topic/squashed']));
     });
+
+    it('detects a branch covered by multiple squash commits', async () => {
+      commit(repo.path, 'init', { 'base.txt': 'base\n' });
+      runGit(repo.path, ['checkout', '-b', 'topic/combined-squashes']);
+      commit(repo.path, 'first topic change', { 'first.txt': 'first\n' });
+      commit(repo.path, 'second topic change', { 'second.txt': 'second\n' });
+      runGit(repo.path, ['checkout', 'main']);
+      runGit(repo.path, ['merge', '--squash', 'topic/combined-squashes']);
+      runGit(repo.path, ['commit', '-m', 'first squash']);
+      runGit(repo.path, ['checkout', 'topic/combined-squashes']);
+      commit(repo.path, 'third topic change', { 'third.txt': 'third\n' });
+      runGit(repo.path, ['checkout', 'main']);
+      runGit(repo.path, ['merge', '--squash', 'topic/combined-squashes']);
+      runGit(repo.path, ['commit', '-m', 'second squash']);
+      runGit(repo.path, ['checkout', 'topic/combined-squashes']);
+      runGit(repo.path, ['checkout', '-b', 'topic/open']);
+      commit(repo.path, 'unmerged topic change', { 'open.txt': 'open\n' });
+
+      const result = await svc.fullyMergedBranches(
+        ['topic/combined-squashes', 'topic/open'], 'main',
+      );
+      expect(result).toEqual(new Set(['topic/combined-squashes']));
+    });
   });
 });

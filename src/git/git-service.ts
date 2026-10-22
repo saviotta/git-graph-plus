@@ -761,7 +761,10 @@ export class GitService {
             merged.add(branch);
             continue;
           }
-          if ([...combinedPatchIds].some(id => targetPatchIds.has(id))) merged.add(branch);
+          if ([...combinedPatchIds].some(id => targetPatchIds.has(id)) ||
+            await this.matchesSquashGroups(base, branch, targetPatchIds)) {
+            merged.add(branch);
+          }
         } catch {}
       }
 
@@ -770,6 +773,29 @@ export class GitService {
       this.warn(`failed to detect fully merged branches: ${err instanceof Error ? err.message : err}`);
       return new Set();
     }
+  }
+
+  private async matchesSquashGroups(base: string, branch: string, targetPatchIds: Set<string>): Promise<boolean> {
+    const commits = (await this.exec(
+      ['rev-list', '--reverse', '--topo-order', '--parents', `${base}..${branch}`],
+      { silent: true },
+    )).trim().split('\n').filter(Boolean).map(line => line.split(/\s+/));
+    if (commits.length < 2 || commits.some((commit, index) => (
+      commit.length !== 2 || commit[1] !== (index === 0 ? base : commits[index - 1][0])
+    ))) {
+      return false;
+    }
+
+    const covered = new Array(commits.length + 1).fill(false);
+    covered[0] = true;
+    for (let start = 0; start < commits.length; start++) {
+      if (!covered[start]) continue;
+      for (let end = start; end < commits.length; end++) {
+        const patchIds = await this.patchIds(['diff', '--no-ext-diff', commits[start][1], commits[end][0]]);
+        if ([...patchIds].some(id => targetPatchIds.has(id))) covered[end + 1] = true;
+      }
+    }
+    return covered[commits.length];
   }
 
   private async patchIds(args: string[]): Promise<Set<string>> {
